@@ -22,7 +22,7 @@ def renew_resnet_paths(old_list, n_shave_prefix_segments=0):
         new_item = old_item
         new_item = new_item.replace("block.", "resnets.")
         new_item = new_item.replace("conv_shorcut", "conv1")
-        new_item = new_item.replace("nin_shortcut", "conv_shortcut")
+        new_item = new_item.replace("in_shortcut", "conv_shortcut")
         new_item = new_item.replace("temb_proj", "time_emb_proj")
 
         new_item = shave_segments(new_item, n_shave_prefix_segments=n_shave_prefix_segments)
@@ -404,7 +404,7 @@ if __name__ == "__main__":
         config = json.loads(f.read())
 
     # unet case
-    key_prefix_set = set(key.split(".")[0] for key in checkpoint.keys())
+    key_prefix_set = {key.split(".")[0] for key in checkpoint.keys()}
     if "encoder" in key_prefix_set and "decoder" in key_prefix_set:
         converted_checkpoint = convert_vq_autoenc_checkpoint(checkpoint, config)
     else:
