@@ -1,4 +1,4 @@
-# Copyright 2022 The HuggingFace Team. All rights reserved.
+# Copyright 2023 The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -67,34 +67,56 @@ To create the package for pypi.
     you need to go back to main before executing this.
 """
 
+import os
 import re
 from distutils.core import Command
 
 from setuptools import find_packages, setup
 
+
 # IMPORTANT:
 # 1. all dependencies should be listed here with their version requirements if any
 # 2. once modified, run: `make deps_table_update` to update src/diffusers/dependency_versions_table.py
 _deps = [
-    "Pillow",
+    "Pillow",  # keep the PIL.Image.Resampling deprecation away
     "accelerate>=0.11.0",
-    "black==22.3",
+    "compel==0.1.8",
+    "black~=23.1",
     "datasets",
     "filelock",
-    "flake8>=3.8.3",
+    "flax>=0.4.1",
     "hf-doc-builder>=0.3.0",
-    "huggingface-hub>=0.8.1,<1.0",
+    "huggingface-hub>=0.13.2",
+    "requests-mock==1.10.0",
     "importlib_metadata",
+    "invisible-watermark>=0.2.0",
     "isort>=5.5.4",
-    "modelcards==0.1.4",
+    "jax>=0.2.8,!=0.3.2",
+    "jaxlib>=0.1.65",
+    "Jinja2",
+    "k-diffusion>=0.0.12",
+    "torchsde",
+    "note_seq",
+    "librosa",
     "numpy",
+    "omegaconf",
+    "parameterized",
+    "protobuf>=3.20.3,<4",
     "pytest",
     "pytest-timeout",
     "pytest-xdist",
+    "ruff==0.0.280",
+    "safetensors>=0.3.1",
+    "sentencepiece>=0.1.91,!=0.1.92",
+    "scipy",
+    "onnx",
     "regex!=2019.12.17",
     "requests",
     "tensorboard",
     "torch>=1.4",
+    "torchvision",
+    "transformers>=4.25.1",
+    "urllib3<=2.0.0",
 ]
 
 # this is a lookup table with items like:
@@ -165,11 +187,38 @@ extras = {}
 
 
 extras = {}
-extras["quality"] = ["black==22.3", "isort>=5.5.4", "flake8>=3.8.3", "hf-doc-builder"]
-extras["docs"] = ["hf-doc-builder"]
-extras["training"] = ["accelerate", "datasets", "tensorboard", "modelcards"]
-extras["test"] = ["datasets", "pytest", "pytest-timeout", "pytest-xdist", "scipy", "transformers"]
-extras["dev"] = extras["quality"] + extras["test"] + extras["training"] + extras["docs"]
+extras["quality"] = deps_list("urllib3", "black", "isort", "ruff", "hf-doc-builder")
+extras["docs"] = deps_list("hf-doc-builder")
+extras["training"] = deps_list("accelerate", "datasets", "protobuf", "tensorboard", "Jinja2")
+extras["test"] = deps_list(
+    "compel",
+    "datasets",
+    "Jinja2",
+    "invisible-watermark",
+    "k-diffusion",
+    "librosa",
+    "omegaconf",
+    "parameterized",
+    "pytest",
+    "pytest-timeout",
+    "pytest-xdist",
+    "requests-mock",
+    "safetensors",
+    "sentencepiece",
+    "scipy",
+    "torchvision",
+    "transformers",
+)
+extras["torch"] = deps_list("torch", "accelerate")
+
+if os.name == "nt":  # windows
+    extras["flax"] = []  # jax is not supported on windows
+else:
+    extras["flax"] = deps_list("jax", "jaxlib", "flax")
+
+extras["dev"] = (
+    extras["quality"] + extras["test"] + extras["training"] + extras["docs"] + extras["torch"] + extras["flax"]
+)
 
 install_requires = [
     deps["importlib_metadata"],
@@ -178,13 +227,13 @@ install_requires = [
     deps["numpy"],
     deps["regex"],
     deps["requests"],
-    deps["torch"],
+    deps["safetensors"],
     deps["Pillow"],
 ]
 
 setup(
     name="diffusers",
-    version="0.2.4",
+    version="0.20.0.dev0",  # expected format is one of x.y.z.dev0, or x.y.z.rc1 or x.y.z (no to dashes, yes to dots)
     description="Diffusers",
     long_description=open("README.md", "r", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
@@ -196,9 +245,10 @@ setup(
     package_dir={"": "src"},
     packages=find_packages("src"),
     include_package_data=True,
-    python_requires=">=3.6.0",
-    install_requires=install_requires,
+    python_requires=">=3.7.0",
+    install_requires=list(install_requires),
     extras_require=extras,
+    entry_points={"console_scripts": ["diffusers-cli=diffusers.commands.diffusers_cli:main"]},
     classifiers=[
         "Development Status :: 5 - Production/Stable",
         "Intended Audience :: Developers",
@@ -207,7 +257,6 @@ setup(
         "License :: OSI Approved :: Apache Software License",
         "Operating System :: OS Independent",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.6",
         "Programming Language :: Python :: 3.7",
         "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",

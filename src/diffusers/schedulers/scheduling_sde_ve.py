@@ -1,4 +1,4 @@
-# Copyright 2022 Google Brain and The HuggingFace Team. All rights reserved.
+# Copyright 2023 Google Brain and The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,112 +14,178 @@
 
 # DISCLAIMER: This file is strongly influenced by https://github.com/yang-song/score_sde_pytorch
 
-# TODO(Patrick, Anton, Suraj) - make scheduler framework indepedent and clean-up a bit
-from typing import Union
+import math
+from dataclasses import dataclass
+from typing import Optional, Tuple, Union
 
-import numpy as np
 import torch
 
 from ..configuration_utils import ConfigMixin, register_to_config
-from .scheduling_utils import SchedulerMixin
+from ..utils import BaseOutput, randn_tensor
+from .scheduling_utils import SchedulerMixin, SchedulerOutput
+
+
+@dataclass
+class SdeVeOutput(BaseOutput):
+    """
+    Output class for the scheduler's `step` function output.
+
+    Args:
+        prev_sample (`torch.FloatTensor` of shape `(batch_size, num_channels, height, width)` for images):
+            Computed sample `(x_{t-1})` of previous timestep. `prev_sample` should be used as next model input in the
+            denoising loop.
+        prev_sample_mean (`torch.FloatTensor` of shape `(batch_size, num_channels, height, width)` for images):
+            Mean averaged `prev_sample` over previous timesteps.
+    """
+
+    prev_sample: torch.FloatTensor
+    prev_sample_mean: torch.FloatTensor
 
 
 class ScoreSdeVeScheduler(SchedulerMixin, ConfigMixin):
     """
-    The variance exploding stochastic differential equation (SDE) scheduler.
+    `ScoreSdeVeScheduler` is a variance exploding stochastic differential equation (SDE) scheduler.
 
-    :param snr: coefficient weighting the step from the model_output sample (from the network) to the random noise.
-    :param sigma_min: initial noise scale for sigma sequence in sampling procedure. The minimum sigma should mirror the
-            distribution of the data.
-    :param sigma_max: :param sampling_eps: the end value of sampling, where timesteps decrease progessively from 1 to
-    epsilon. :param correct_steps: number of correction steps performed on a produced sample. :param tensor_format:
-    "np" or "pt" for the expected format of samples passed to the Scheduler.
+    This model inherits from [`SchedulerMixin`] and [`ConfigMixin`]. Check the superclass documentation for the generic
+    methods the library implements for all schedulers such as loading and saving.
+
+    Args:
+        num_train_timesteps (`int`, defaults to 1000):
+            The number of diffusion steps to train the model.
+        snr (`float`, defaults to 0.15):
+            A coefficient weighting the step from the `model_output` sample (from the network) to the random noise.
+        sigma_min (`float`, defaults to 0.01):
+            The initial noise scale for the sigma sequence in the sampling procedure. The minimum sigma should mirror
+            the distribution of the data.
+        sigma_max (`float`, defaults to 1348.0):
+            The maximum value used for the range of continuous timesteps passed into the model.
+        sampling_eps (`float`, defaults to 1e-5):
+            The end value of sampling where timesteps decrease progressively from 1 to epsilon.
+        correct_steps (`int`, defaults to 1):
+            The number of correction steps performed on a produced sample.
     """
+
+    order = 1
 
     @register_to_config
     def __init__(
         self,
-        num_train_timesteps=2000,
-        snr=0.15,
-        sigma_min=0.01,
-        sigma_max=1348,
-        sampling_eps=1e-5,
-        correct_steps=1,
-        tensor_format="pt",
+        num_train_timesteps: int = 2000,
+        snr: float = 0.15,
+        sigma_min: float = 0.01,
+        sigma_max: float = 1348.0,
+        sampling_eps: float = 1e-5,
+        correct_steps: int = 1,
     ):
-        # self.sigmas = None
-        # self.discrete_sigmas = None
-        #
-        # # setable values
-        # self.num_inference_steps = None
+        # standard deviation of the initial noise distribution
+        self.init_noise_sigma = sigma_max
+
+        # setable values
         self.timesteps = None
 
         self.set_sigmas(num_train_timesteps, sigma_min, sigma_max, sampling_eps)
 
-        self.tensor_format = tensor_format
-        self.set_format(tensor_format=tensor_format)
+    def scale_model_input(self, sample: torch.FloatTensor, timestep: Optional[int] = None) -> torch.FloatTensor:
+        """
+        Ensures interchangeability with schedulers that need to scale the denoising model input depending on the
+        current timestep.
 
-    def set_timesteps(self, num_inference_steps, sampling_eps=None):
+        Args:
+            sample (`torch.FloatTensor`):
+                The input sample.
+            timestep (`int`, *optional*):
+                The current timestep in the diffusion chain.
+
+        Returns:
+            `torch.FloatTensor`:
+                A scaled input sample.
+        """
+        return sample
+
+    def set_timesteps(
+        self, num_inference_steps: int, sampling_eps: float = None, device: Union[str, torch.device] = None
+    ):
+        """
+        Sets the continuous timesteps used for the diffusion chain (to be run before inference).
+
+        Args:
+            num_inference_steps (`int`):
+                The number of diffusion steps used when generating samples with a pre-trained model.
+            sampling_eps (`float`, *optional*):
+                The final timestep value (overrides value given during scheduler instantiation).
+            device (`str` or `torch.device`, *optional*):
+                The device to which the timesteps should be moved to. If `None`, the timesteps are not moved.
+
+        """
         sampling_eps = sampling_eps if sampling_eps is not None else self.config.sampling_eps
-        tensor_format = getattr(self, "tensor_format", "pt")
-        if tensor_format == "np":
-            self.timesteps = np.linspace(1, sampling_eps, num_inference_steps)
-        elif tensor_format == "pt":
-            self.timesteps = torch.linspace(1, sampling_eps, num_inference_steps)
-        else:
-            raise ValueError(f"`self.tensor_format`: {self.tensor_format} is not valid.")
 
-    def set_sigmas(self, num_inference_steps, sigma_min=None, sigma_max=None, sampling_eps=None):
+        self.timesteps = torch.linspace(1, sampling_eps, num_inference_steps, device=device)
+
+    def set_sigmas(
+        self, num_inference_steps: int, sigma_min: float = None, sigma_max: float = None, sampling_eps: float = None
+    ):
+        """
+        Sets the noise scales used for the diffusion chain (to be run before inference). The sigmas control the weight
+        of the `drift` and `diffusion` components of the sample update.
+
+        Args:
+            num_inference_steps (`int`):
+                The number of diffusion steps used when generating samples with a pre-trained model.
+            sigma_min (`float`, optional):
+                The initial noise scale value (overrides value given during scheduler instantiation).
+            sigma_max (`float`, optional):
+                The final noise scale value (overrides value given during scheduler instantiation).
+            sampling_eps (`float`, optional):
+                The final timestep value (overrides value given during scheduler instantiation).
+
+        """
         sigma_min = sigma_min if sigma_min is not None else self.config.sigma_min
         sigma_max = sigma_max if sigma_max is not None else self.config.sigma_max
         sampling_eps = sampling_eps if sampling_eps is not None else self.config.sampling_eps
         if self.timesteps is None:
             self.set_timesteps(num_inference_steps, sampling_eps)
 
-        tensor_format = getattr(self, "tensor_format", "pt")
-        if tensor_format == "np":
-            self.discrete_sigmas = np.exp(np.linspace(np.log(sigma_min), np.log(sigma_max), num_inference_steps))
-            self.sigmas = np.array([sigma_min * (sigma_max / sigma_min) ** t for t in self.timesteps])
-        elif tensor_format == "pt":
-            self.discrete_sigmas = torch.exp(torch.linspace(np.log(sigma_min), np.log(sigma_max), num_inference_steps))
-            self.sigmas = torch.tensor([sigma_min * (sigma_max / sigma_min) ** t for t in self.timesteps])
-        else:
-            raise ValueError(f"`self.tensor_format`: {self.tensor_format} is not valid.")
+        self.sigmas = sigma_min * (sigma_max / sigma_min) ** (self.timesteps / sampling_eps)
+        self.discrete_sigmas = torch.exp(torch.linspace(math.log(sigma_min), math.log(sigma_max), num_inference_steps))
+        self.sigmas = torch.tensor([sigma_min * (sigma_max / sigma_min) ** t for t in self.timesteps])
 
     def get_adjacent_sigma(self, timesteps, t):
-        tensor_format = getattr(self, "tensor_format", "pt")
-        if tensor_format == "np":
-            return np.where(timesteps == 0, np.zeros_like(t), self.discrete_sigmas[timesteps - 1])
-        elif tensor_format == "pt":
-            return torch.where(
-                timesteps == 0, torch.zeros_like(t), self.discrete_sigmas[timesteps - 1].to(timesteps.device)
-            )
-
-        raise ValueError(f"`self.tensor_format`: {self.tensor_format} is not valid.")
-
-    def set_seed(self, seed):
-        tensor_format = getattr(self, "tensor_format", "pt")
-        if tensor_format == "np":
-            np.random.seed(seed)
-        elif tensor_format == "pt":
-            torch.manual_seed(seed)
-        else:
-            raise ValueError(f"`self.tensor_format`: {self.tensor_format} is not valid.")
+        return torch.where(
+            timesteps == 0,
+            torch.zeros_like(t.to(timesteps.device)),
+            self.discrete_sigmas[timesteps - 1].to(timesteps.device),
+        )
 
     def step_pred(
         self,
-        model_output: Union[torch.FloatTensor, np.ndarray],
+        model_output: torch.FloatTensor,
         timestep: int,
-        sample: Union[torch.FloatTensor, np.ndarray],
-        seed=None,
-    ):
+        sample: torch.FloatTensor,
+        generator: Optional[torch.Generator] = None,
+        return_dict: bool = True,
+    ) -> Union[SdeVeOutput, Tuple]:
         """
-        Predict the sample at the previous timestep by reversing the SDE.
-        """
-        if seed is not None:
-            self.set_seed(seed)
-        # TODO(Patrick) non-PyTorch
+        Predict the sample from the previous timestep by reversing the SDE. This function propagates the diffusion
+        process from the learned model outputs (most often the predicted noise).
 
+        Args:
+            model_output (`torch.FloatTensor`):
+                The direct output from learned diffusion model.
+            timestep (`int`):
+                The current discrete timestep in the diffusion chain.
+            sample (`torch.FloatTensor`):
+                A current instance of a sample created by the diffusion process.
+            generator (`torch.Generator`, *optional*):
+                A random number generator.
+            return_dict (`bool`, *optional*, defaults to `True`):
+                Whether or not to return a [`~schedulers.scheduling_sde_ve.SdeVeOutput`] or `tuple`.
+
+        Returns:
+            [`~schedulers.scheduling_sde_ve.SdeVeOutput`] or `tuple`:
+                If return_dict is `True`, [`~schedulers.scheduling_sde_ve.SdeVeOutput`] is returned, otherwise a tuple
+                is returned where the first element is the sample tensor.
+
+        """
         if self.timesteps is None:
             raise ValueError(
                 "`self.timesteps` is not set, you need to run 'set_timesteps' after creating the scheduler"
@@ -130,36 +196,61 @@ class ScoreSdeVeScheduler(SchedulerMixin, ConfigMixin):
         )  # torch.repeat_interleave(timestep, sample.shape[0])
         timesteps = (timestep * (len(self.timesteps) - 1)).long()
 
+        # mps requires indices to be in the same device, so we use cpu as is the default with cuda
+        timesteps = timesteps.to(self.discrete_sigmas.device)
+
         sigma = self.discrete_sigmas[timesteps].to(sample.device)
-        adjacent_sigma = self.get_adjacent_sigma(timesteps, timestep)
-        drift = self.zeros_like(sample)
+        adjacent_sigma = self.get_adjacent_sigma(timesteps, timestep).to(sample.device)
+        drift = torch.zeros_like(sample)
         diffusion = (sigma**2 - adjacent_sigma**2) ** 0.5
 
         # equation 6 in the paper: the model_output modeled by the network is grad_x log pt(x)
         # also equation 47 shows the analog from SDE models to ancestral sampling methods
-        drift = drift - diffusion[:, None, None, None] ** 2 * model_output
+        diffusion = diffusion.flatten()
+        while len(diffusion.shape) < len(sample.shape):
+            diffusion = diffusion.unsqueeze(-1)
+        drift = drift - diffusion**2 * model_output
 
         #  equation 6: sample noise for the diffusion term of
-        noise = self.randn_like(sample)
+        noise = randn_tensor(
+            sample.shape, layout=sample.layout, generator=generator, device=sample.device, dtype=sample.dtype
+        )
         prev_sample_mean = sample - drift  # subtract because `dt` is a small negative timestep
         # TODO is the variable diffusion the correct scaling term for the noise?
-        prev_sample = prev_sample_mean + diffusion[:, None, None, None] * noise  # add impact of diffusion field g
+        prev_sample = prev_sample_mean + diffusion * noise  # add impact of diffusion field g
 
-        return {"prev_sample": prev_sample, "prev_sample_mean": prev_sample_mean}
+        if not return_dict:
+            return (prev_sample, prev_sample_mean)
+
+        return SdeVeOutput(prev_sample=prev_sample, prev_sample_mean=prev_sample_mean)
 
     def step_correct(
         self,
-        model_output: Union[torch.FloatTensor, np.ndarray],
-        sample: Union[torch.FloatTensor, np.ndarray],
-        seed=None,
-    ):
+        model_output: torch.FloatTensor,
+        sample: torch.FloatTensor,
+        generator: Optional[torch.Generator] = None,
+        return_dict: bool = True,
+    ) -> Union[SchedulerOutput, Tuple]:
         """
-        Correct the predicted sample based on the output model_output of the network. This is often run repeatedly
-        after making the prediction for the previous timestep.
-        """
-        if seed is not None:
-            self.set_seed(seed)
+        Correct the predicted sample based on the `model_output` of the network. This is often run repeatedly after
+        making the prediction for the previous timestep.
 
+        Args:
+            model_output (`torch.FloatTensor`):
+                The direct output from learned diffusion model.
+            sample (`torch.FloatTensor`):
+                A current instance of a sample created by the diffusion process.
+            generator (`torch.Generator`, *optional*):
+                A random number generator.
+            return_dict (`bool`, *optional*, defaults to `True`):
+                Whether or not to return a [`~schedulers.scheduling_sde_ve.SdeVeOutput`] or `tuple`.
+
+        Returns:
+            [`~schedulers.scheduling_sde_ve.SdeVeOutput`] or `tuple`:
+                If return_dict is `True`, [`~schedulers.scheduling_sde_ve.SdeVeOutput`] is returned, otherwise a tuple
+                is returned where the first element is the sample tensor.
+
+        """
         if self.timesteps is None:
             raise ValueError(
                 "`self.timesteps` is not set, you need to run 'set_timesteps' after creating the scheduler"
@@ -167,20 +258,43 @@ class ScoreSdeVeScheduler(SchedulerMixin, ConfigMixin):
 
         # For small batch sizes, the paper "suggest replacing norm(z) with sqrt(d), where d is the dim. of z"
         # sample noise for correction
-        noise = self.randn_like(sample)
+        noise = randn_tensor(sample.shape, layout=sample.layout, generator=generator).to(sample.device)
 
         # compute step size from the model_output, the noise, and the snr
-        grad_norm = self.norm(model_output)
-        noise_norm = self.norm(noise)
+        grad_norm = torch.norm(model_output.reshape(model_output.shape[0], -1), dim=-1).mean()
+        noise_norm = torch.norm(noise.reshape(noise.shape[0], -1), dim=-1).mean()
         step_size = (self.config.snr * noise_norm / grad_norm) ** 2 * 2
         step_size = step_size * torch.ones(sample.shape[0]).to(sample.device)
         # self.repeat_scalar(step_size, sample.shape[0])
 
         # compute corrected sample: model_output term and noise term
-        prev_sample_mean = sample + step_size[:, None, None, None] * model_output
-        prev_sample = prev_sample_mean + ((step_size * 2) ** 0.5)[:, None, None, None] * noise
+        step_size = step_size.flatten()
+        while len(step_size.shape) < len(sample.shape):
+            step_size = step_size.unsqueeze(-1)
+        prev_sample_mean = sample + step_size * model_output
+        prev_sample = prev_sample_mean + ((step_size * 2) ** 0.5) * noise
 
-        return {"prev_sample": prev_sample}
+        if not return_dict:
+            return (prev_sample,)
+
+        return SchedulerOutput(prev_sample=prev_sample)
+
+    def add_noise(
+        self,
+        original_samples: torch.FloatTensor,
+        noise: torch.FloatTensor,
+        timesteps: torch.FloatTensor,
+    ) -> torch.FloatTensor:
+        # Make sure sigmas and timesteps have the same device and dtype as original_samples
+        timesteps = timesteps.to(original_samples.device)
+        sigmas = self.discrete_sigmas.to(original_samples.device)[timesteps]
+        noise = (
+            noise * sigmas[:, None, None, None]
+            if noise is not None
+            else torch.randn_like(original_samples) * sigmas[:, None, None, None]
+        )
+        noisy_samples = noise + original_samples
+        return noisy_samples
 
     def __len__(self):
         return self.config.num_train_timesteps

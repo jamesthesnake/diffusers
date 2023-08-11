@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2020 The HuggingFace Inc. team.
+# Copyright 2023 The HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -219,7 +219,7 @@ def check_model_list():
     # Get the models from the directory structure of `src/transformers/models/`
     models = [model for model in dir(diffusers.models) if not model.startswith("__")]
 
-    missing_models = sorted(list(set(_models).difference(models)))
+    missing_models = sorted(set(_models).difference(models))
     if missing_models:
         raise Exception(
             f"The following models should be included in {models_dir}/__init__.py: {','.join(missing_models)}."
@@ -342,7 +342,7 @@ def get_model_test_files():
             path = os.path.join(target_dir, file_or_dir)
             if os.path.isfile(path):
                 filename = os.path.split(path)[-1]
-                if "test_modeling" in filename and not os.path.splitext(filename)[0] in _ignore_files:
+                if "test_modeling" in filename and os.path.splitext(filename)[0] not in _ignore_files:
                     file = os.path.join(*path.split(os.sep)[1:])
                     test_files.append(file)
 
@@ -429,7 +429,7 @@ def get_all_auto_configured_models():
         for attr_name in dir(diffusers.models.auto.modeling_flax_auto):
             if attr_name.startswith("FLAX_MODEL_") and attr_name.endswith("MAPPING_NAMES"):
                 result = result | set(get_values(getattr(diffusers.models.auto.modeling_flax_auto, attr_name)))
-    return [cls for cls in result]
+    return list(result)
 
 
 def ignore_unautoclassed(model_name):
@@ -536,7 +536,7 @@ def find_all_documented_objects():
             content = f.read()
         raw_doc_objs = re.findall(r"(?:autoclass|autofunction):: transformers.(\S+)\s+", content)
         documented_obj += [obj.split(".")[-1] for obj in raw_doc_objs]
-    for doc_file in Path(PATH_TO_DOC).glob("**/*.mdx"):
+    for doc_file in Path(PATH_TO_DOC).glob("**/*.md"):
         with open(doc_file, "r", encoding="utf-8", newline="\n") as f:
             content = f.read()
         raw_doc_objs = re.findall("\[\[autodoc\]\]\s+(\S+)\s+", content)
@@ -674,7 +674,7 @@ def check_all_objects_are_documented():
 def check_model_type_doc_match():
     """Check all doc pages have a corresponding model type."""
     model_doc_folder = Path(PATH_TO_DOC) / "model_doc"
-    model_docs = [m.stem for m in model_doc_folder.glob("*.mdx")]
+    model_docs = [m.stem for m in model_doc_folder.glob("*.md")]
 
     model_types = list(diffusers.models.auto.configuration_auto.MODEL_NAMES_MAPPING.keys())
     model_types = [MODEL_TYPE_TO_DOC_MAPPING[m] if m in MODEL_TYPE_TO_DOC_MAPPING else m for m in model_types]
