@@ -1,14 +1,25 @@
-## Training examples
+## Training an unconditional diffusion model
 
 Creating a training image set is [described in a different document](https://huggingface.co/docs/datasets/image_process#image-datasets).
 
 ### Installing the dependencies
 
-Before running the scipts, make sure to install the library's training dependencies:
+Before running the scripts, make sure to install the library's training dependencies:
 
+**Important**
+
+To make sure you can successfully run the latest versions of the example scripts, we highly recommend **installing from source** and keeping the install up to date as we update the example scripts frequently and install some example-specific requirements. To do this, execute the following steps in a new virtual environment:
 ```bash
-pip install diffusers[training] accelerate datasets
+git clone https://github.com/huggingface/diffusers
+cd diffusers
+pip install .
 ```
+
+Then cd in the example folder  and run
+```bash
+pip install -r requirements.txt
+```
+
 
 And initialize an [🤗Accelerate](https://github.com/huggingface/accelerate/) environment with:
 
@@ -23,11 +34,12 @@ The command to train a DDPM UNet model on the Oxford Flowers dataset:
 ```bash
 accelerate launch train_unconditional.py \
   --dataset_name="huggan/flowers-102-categories" \
-  --resolution=64 \
+  --resolution=64 --center_crop --random_flip \
   --output_dir="ddpm-ema-flowers-64" \
   --train_batch_size=16 \
   --num_epochs=100 \
   --gradient_accumulation_steps=1 \
+  --use_ema \
   --learning_rate=1e-4 \
   --lr_warmup_steps=500 \
   --mixed_precision=no \
@@ -47,11 +59,12 @@ The command to train a DDPM UNet model on the Pokemon dataset:
 ```bash
 accelerate launch train_unconditional.py \
   --dataset_name="huggan/pokemon" \
-  --resolution=64 \
+  --resolution=64 --center_crop --random_flip \
   --output_dir="ddpm-ema-pokemon-64" \
   --train_batch_size=16 \
   --num_epochs=100 \
   --gradient_accumulation_steps=1 \
+  --use_ema \
   --learning_rate=1e-4 \
   --lr_warmup_steps=500 \
   --mixed_precision=no \
@@ -63,6 +76,27 @@ A full training run takes 2 hours on 4xV100 GPUs.
 
 <img src="https://user-images.githubusercontent.com/26864830/180248200-928953b4-db38-48db-b0c6-8b740fe6786f.png" width="700" />
 
+### Training with multiple GPUs
+
+`accelerate` allows for seamless multi-GPU training. Follow the instructions [here](https://huggingface.co/docs/accelerate/basic_tutorials/launch)
+for running distributed training with `accelerate`. Here is an example command:
+
+```bash
+accelerate launch --mixed_precision="fp16" --multi_gpu train_unconditional.py \
+  --dataset_name="huggan/pokemon" \
+  --resolution=64 --center_crop --random_flip \
+  --output_dir="ddpm-ema-pokemon-64" \
+  --train_batch_size=16 \
+  --num_epochs=100 \
+  --gradient_accumulation_steps=1 \
+  --use_ema \
+  --learning_rate=1e-4 \
+  --lr_warmup_steps=500 \
+  --mixed_precision="fp16" \
+  --logger="wandb"
+```
+
+To be able to use Weights and Biases (`wandb`) as a logger you need to install the library: `pip install wandb`. 
 
 ### Using your own data
 
@@ -102,7 +136,7 @@ from datasets import load_dataset
 # example 1: local folder
 dataset = load_dataset("imagefolder", data_dir="path_to_your_folder")
 
-# example 2: local files (suppoted formats are tar, gzip, zip, xz, rar, zstd)
+# example 2: local files (supported formats are tar, gzip, zip, xz, rar, zstd)
 dataset = load_dataset("imagefolder", data_files="path_to_zip_file")
 
 # example 3: remote files (supported formats are tar, gzip, zip, xz, rar, zstd)
